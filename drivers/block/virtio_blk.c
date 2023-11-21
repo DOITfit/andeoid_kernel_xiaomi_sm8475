@@ -16,6 +16,9 @@
 #include <linux/blk-mq-virtio.h>
 #include <linux/numa.h>
 #include <uapi/linux/virtio_ring.h>
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+#include <trace/events/gh_virtio_frontend.h>
+#endif
 
 #define PART_BITS 4
 #define VQ_NAME_LEN 16
@@ -188,6 +191,9 @@ static void virtblk_done(struct virtqueue *vq)
 
 			if (likely(!blk_should_fake_timeout(req->q)))
 				blk_mq_complete_request(req);
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+			trace_virtio_block_done(vq->vdev->index, req_op(req), blk_rq_pos(req));
+#endif
 			req_done = true;
 		}
 		if (unlikely(virtqueue_is_broken(vq)))
@@ -228,8 +234,6 @@ static blk_status_t virtio_queue_rq(struct blk_mq_hw_ctx *hctx,
 	bool unmap = false;
 	u32 type;
 
-	BUG_ON(req->nr_phys_segments + 2 > vblk->sg_elems);
-
 	switch (req_op(req)) {
 	case REQ_OP_READ:
 	case REQ_OP_WRITE:
@@ -252,6 +256,10 @@ static blk_status_t virtio_queue_rq(struct blk_mq_hw_ctx *hctx,
 		WARN_ON_ONCE(1);
 		return BLK_STS_IOERR;
 	}
+
+	BUG_ON(type != VIRTIO_BLK_T_DISCARD &&
+	       type != VIRTIO_BLK_T_WRITE_ZEROES &&
+	       (req->nr_phys_segments + 2 > vblk->sg_elems));
 
 	vbr->out_hdr.type = cpu_to_virtio32(vblk->vdev, type);
 	vbr->out_hdr.sector = type ?
@@ -276,6 +284,10 @@ static blk_status_t virtio_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	spin_lock_irqsave(&vblk->vqs[qid].lock, flags);
 	err = virtblk_add_req(vblk->vqs[qid].vq, vbr, vbr->sg, num);
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+	trace_virtio_block_submit(vblk->vqs[qid].vq->vdev->index,
+		vbr->out_hdr.type, vbr->out_hdr.sector, vbr->out_hdr.ioprio, err, num);
+#endif
 	if (err) {
 		virtqueue_kick(vblk->vqs[qid].vq);
 		/* Don't stop the queue if -ENOMEM: we may have failed to
@@ -831,7 +843,7 @@ static int virtblk_probe(struct virtio_device *vdev)
 			dev_err(&vdev->dev,
 				"virtio_blk: invalid block size: 0x%x\n",
 				blk_size);
-			goto out_free_tags;
+			goto out_cleanup_disk;
 		}
 
 		blk_queue_logical_block_size(q, blk_size);
@@ -903,6 +915,8 @@ static int virtblk_probe(struct virtio_device *vdev)
 	device_add_disk(&vdev->dev, vblk->disk, virtblk_attr_groups);
 	return 0;
 
+out_cleanup_disk:
+	blk_cleanup_queue(vblk->disk->queue);
 out_free_tags:
 	blk_mq_free_tag_set(&vblk->tag_set);
 out_put_disk:

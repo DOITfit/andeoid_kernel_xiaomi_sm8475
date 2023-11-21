@@ -41,6 +41,7 @@
 *.so.dbg
 *.su
 *.symtypes
+*.symversions
 *.tab.[ch]
 *.tar
 *.xz
@@ -153,6 +154,13 @@ x509.genkey
 
 # Clang's compilation database file
 /compile_commands.json
+
+# generated defconfigs
+arch/*/configs/vendor/*_defconfig
+
+# vendor device tree directories
+arch/arm64/boot/dts/vendor
+arch/arm/boot/dts/vendor
 
 # Documentation toolchain
 sphinx_*/

@@ -48,8 +48,14 @@
 #include <asm/mach/arch.h>
 #include <asm/mpu.h>
 
+#include <soc/qcom/lpm_levels.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_raise);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_exit);
 
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
@@ -737,6 +743,10 @@ void __init set_smp_ipi_range(int ipi_base, int n)
 
 		ipi_desc[i] = irq_to_desc(ipi_base + i);
 		irq_set_status_flags(ipi_base + i, IRQ_HIDDEN);
+
+		/* The recheduling IPI is special... */
+		if (i == IPI_RESCHEDULE)
+			__irq_modify_status(ipi_base + i, 0, IRQ_RAW, ~0);
 	}
 
 	ipi_irq_base = ipi_base;
@@ -747,6 +757,7 @@ void __init set_smp_ipi_range(int ipi_base, int n)
 
 void smp_send_reschedule(int cpu)
 {
+	update_ipi_history(cpu);
 	smp_cross_call(cpumask_of(cpu), IPI_RESCHEDULE);
 }
 

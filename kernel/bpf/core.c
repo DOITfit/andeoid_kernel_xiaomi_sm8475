@@ -32,9 +32,12 @@
 #include <linux/perf_event.h>
 #include <linux/extable.h>
 #include <linux/log2.h>
+#include <linux/nospec.h>
 
 #include <asm/barrier.h>
 #include <asm/unaligned.h>
+
+#include <trace/hooks/memory.h>
 
 /* Registers */
 #define BPF_R0	regs[BPF_REG_0]
@@ -825,7 +828,7 @@ static int __init bpf_jit_charge_init(void)
 {
 	/* Only used as heuristic here to derive limit. */
 	bpf_jit_limit_max = bpf_jit_alloc_exec_limit();
-	bpf_jit_limit = min_t(u64, round_up(bpf_jit_limit_max >> 2,
+	bpf_jit_limit = min_t(u64, round_up(bpf_jit_limit_max >> 1,
 					    PAGE_SIZE), LONG_MAX);
 	return 0;
 }
@@ -903,6 +906,8 @@ void bpf_jit_binary_free(struct bpf_binary_header *hdr)
 {
 	u32 pages = hdr->pages;
 
+	trace_android_vh_set_memory_rw((unsigned long)hdr, pages);
+	trace_android_vh_set_memory_nx((unsigned long)hdr, pages);
 	bpf_jit_free_exec(hdr);
 	bpf_jit_uncharge_modmem(pages);
 }
@@ -1642,9 +1647,7 @@ out:
 		 * reuse preexisting logic from Spectre v1 mitigation that
 		 * happens to produce the required code on x86 for v4 as well.
 		 */
-#ifdef CONFIG_X86
 		barrier_nospec();
-#endif
 		CONT;
 #define LDST(SIZEOP, SIZE)						\
 	STX_MEM_##SIZEOP:						\
@@ -2190,14 +2193,8 @@ static void bpf_prog_free_deferred(struct work_struct *work)
 #endif
 	if (aux->dst_trampoline)
 		bpf_trampoline_put(aux->dst_trampoline);
-	for (i = 0; i < aux->func_cnt; i++) {
-		/* We can just unlink the subprog poke descriptor table as
-		 * it was originally linked to the main program and is also
-		 * released along with it.
-		 */
-		aux->func[i]->aux->poke_tab = NULL;
+	for (i = 0; i < aux->func_cnt; i++)
 		bpf_jit_free(aux->func[i]);
-	}
 	if (aux->func_cnt) {
 		kfree(aux->func);
 		bpf_prog_unlock_free(aux->prog);
@@ -2348,6 +2345,7 @@ DEFINE_STATIC_KEY_FALSE(bpf_stats_enabled_key);
 EXPORT_SYMBOL(bpf_stats_enabled_key);
 
 /* All definitions of tracepoints related to BPF. */
+#undef TRACE_INCLUDE_PATH
 #define CREATE_TRACE_POINTS
 #include <linux/bpf_trace.h>
 

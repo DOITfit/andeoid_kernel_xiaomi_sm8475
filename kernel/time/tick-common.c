@@ -17,6 +17,7 @@
 #include <linux/sched.h>
 #include <linux/module.h>
 #include <trace/events/power.h>
+#include <trace/hooks/sched.h>
 
 #include <asm/irq_regs.h>
 
@@ -30,7 +31,6 @@ DEFINE_PER_CPU(struct tick_device, tick_cpu_device);
  * Tick next event: keeps track of the tick time
  */
 ktime_t tick_next_period;
-ktime_t tick_period;
 
 /*
  * tick_do_timer_cpu is a timer core internal variable which holds the CPU NR
@@ -88,12 +88,13 @@ static void tick_periodic(int cpu)
 		write_seqcount_begin(&jiffies_seq);
 
 		/* Keep track of the next tick event */
-		tick_next_period = ktime_add(tick_next_period, tick_period);
+		tick_next_period = ktime_add_ns(tick_next_period, TICK_NSEC);
 
 		do_timer(1);
 		write_seqcount_end(&jiffies_seq);
 		raw_spin_unlock(&jiffies_lock);
 		update_wall_time();
+		trace_android_vh_jiffies_update(NULL);
 	}
 
 	update_process_times(user_mode(get_irq_regs()));
@@ -127,7 +128,7 @@ void tick_handle_periodic(struct clock_event_device *dev)
 		 * Setup the next period for devices, which do not have
 		 * periodic mode:
 		 */
-		next = ktime_add(next, tick_period);
+		next = ktime_add_ns(next, TICK_NSEC);
 
 		if (!clockevents_program_event(dev, next, false))
 			return;
@@ -173,7 +174,7 @@ void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
 		for (;;) {
 			if (!clockevents_program_event(dev, next, false))
 				return;
-			next = ktime_add(next, tick_period);
+			next = ktime_add_ns(next, TICK_NSEC);
 		}
 	}
 }
@@ -217,10 +218,19 @@ static void tick_setup_device(struct tick_device *td,
 		 * this cpu:
 		 */
 		if (tick_do_timer_cpu == TICK_DO_TIMER_BOOT) {
+			ktime_t next_p;
+			u32 rem;
+
 			tick_do_timer_cpu = cpu;
 
-			tick_next_period = ktime_get();
-			tick_period = NSEC_PER_SEC / HZ;
+			next_p = ktime_get();
+			div_u64_rem(next_p, TICK_NSEC, &rem);
+			if (rem) {
+				next_p -= rem;
+				next_p += TICK_NSEC;
+			}
+
+			tick_next_period = next_p;
 #ifdef CONFIG_NO_HZ_FULL
 			/*
 			 * The boot CPU may be nohz_full, in which case set
@@ -378,7 +388,7 @@ out_bc:
 	/*
 	 * Can the new device be used as a broadcast device ?
 	 */
-	tick_install_broadcast_device(newdev);
+	tick_install_broadcast_device(newdev, cpu);
 }
 
 /**

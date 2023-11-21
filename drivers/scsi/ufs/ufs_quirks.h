@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2020, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _UFS_QUIRKS_H_
@@ -115,5 +115,11 @@ struct ufs_dev_fix {
  * suspend flow.
  */
 #define UFS_DEVICE_QUIRK_DELAY_AFTER_LPM        (1 << 11)
+
+/*
+ * Some UFS devices require L2P entry should be swapped before being sent to the
+ * UFS device for HPB READ command.
+ */
+#define UFS_DEVICE_QUIRK_SWAP_L2P_ENTRY_FOR_HPB_READ (1 << 12)
 
 #endif /* UFS_QUIRKS_H_ */

@@ -11,6 +11,9 @@
 #include <linux/module.h>
 #include <linux/hrtimer.h>
 #include <linux/dma-mapping.h>
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+#include <trace/events/gh_virtio_frontend.h>
+#endif
 #include <xen/xen.h>
 
 #ifdef DEBUG
@@ -556,6 +559,11 @@ static inline int virtqueue_add_split(struct virtqueue *_vq,
 
 	pr_debug("Added buffer head %i to %p\n", head, vq);
 	END_USE(vq);
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+	trace_virtio_vring_split_add(_vq->vdev->index, head,
+			vq->split.avail_idx_shadow-1, descs_used, vq->vq.num_free);
+#endif
+
 
 	/* This is very unlikely, but theoretically possible.  Kick
 	 * just in case. */
@@ -643,6 +651,10 @@ static void detach_buf_split(struct vring_virtqueue *vq, unsigned int head,
 	/* Plus final descriptor */
 	vq->vq.num_free++;
 
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+	trace_virtio_detach_buf(vq->vq.vdev->index, vq->free_head, vq->vq.num_free);
+#endif
+
 	if (vq->indirect) {
 		struct vring_desc *indir_desc =
 				vq->split.desc_state[head].indir_desc;
@@ -690,6 +702,11 @@ static void *virtqueue_get_buf_ctx_split(struct virtqueue *_vq,
 		END_USE(vq);
 		return NULL;
 	}
+
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+	trace_virtio_get_buf_ctx_split(_vq->vdev->index, vq->last_used_idx,
+			virtio16_to_cpu(vq->vq.vdev, vq->split.vring.used->idx));
+#endif
 
 	if (!more_used_split(vq)) {
 		pr_debug("No more buffers in queue\n");
@@ -1678,9 +1695,7 @@ static struct virtqueue *vring_create_virtqueue_packed(
 			cpu_to_le16(vq->packed.event_flags_shadow);
 	}
 
-	spin_lock(&vdev->vqs_list_lock);
 	list_add_tail(&vq->vq.list, &vdev->vqs);
-	spin_unlock(&vdev->vqs_list_lock);
 	return &vq->vq;
 
 err_desc_extra:
@@ -2138,9 +2153,7 @@ struct virtqueue *__vring_new_virtqueue(unsigned int index,
 	memset(vq->split.desc_state, 0, vring.num *
 			sizeof(struct vring_desc_state_split));
 
-	spin_lock(&vdev->vqs_list_lock);
 	list_add_tail(&vq->vq.list, &vdev->vqs);
-	spin_unlock(&vdev->vqs_list_lock);
 	return &vq->vq;
 }
 EXPORT_SYMBOL_GPL(__vring_new_virtqueue);
@@ -2224,9 +2237,7 @@ void vring_del_virtqueue(struct virtqueue *_vq)
 	}
 	if (!vq->packed_ring)
 		kfree(vq->split.desc_state);
-	spin_lock(&vq->vq.vdev->vqs_list_lock);
 	list_del(&_vq->list);
-	spin_unlock(&vq->vq.vdev->vqs_list_lock);
 	kfree(vq);
 }
 EXPORT_SYMBOL_GPL(vring_del_virtqueue);
@@ -2290,14 +2301,12 @@ void virtio_break_device(struct virtio_device *dev)
 {
 	struct virtqueue *_vq;
 
-	spin_lock(&dev->vqs_list_lock);
 	list_for_each_entry(_vq, &dev->vqs, list) {
 		struct vring_virtqueue *vq = to_vvq(_vq);
 
 		/* Pairs with READ_ONCE() in virtqueue_is_broken(). */
 		WRITE_ONCE(vq->broken, true);
 	}
-	spin_unlock(&dev->vqs_list_lock);
 }
 EXPORT_SYMBOL_GPL(virtio_break_device);
 

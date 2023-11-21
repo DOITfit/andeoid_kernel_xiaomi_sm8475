@@ -15,9 +15,11 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
 #include <linux/spinlock.h>
+#include <linux/pinctrl/consumer.h>
 
 #include "coresight-priv.h"
 #include "coresight-cti.h"
@@ -69,16 +71,29 @@ void cti_write_all_hw_regs(struct cti_drvdata *drvdata)
 	writel_relaxed(0, drvdata->base + CTICONTROL);
 
 	/* write the CTI trigger registers */
-	for (i = 0; i < config->nr_trig_max; i++) {
-		writel_relaxed(config->ctiinen[i], drvdata->base + CTIINEN(i));
-		writel_relaxed(config->ctiouten[i],
-			       drvdata->base + CTIOUTEN(i));
-	}
+	if (drvdata->extended_cti) {
+		for (i = 0; i < config->nr_trig_max; i++) {
+			writel_relaxed(config->ctiinen[i], drvdata->base + CTIINEN_EXTENDED(i));
+			writel_relaxed(config->ctiouten[i],
+				      drvdata->base + CTIOUTEN_EXTENDED(i));
+		}
 
-	/* other regs */
-	writel_relaxed(config->ctigate, drvdata->base + CTIGATE);
-	writel_relaxed(config->asicctl, drvdata->base + ASICCTL);
-	writel_relaxed(config->ctiappset, drvdata->base + CTIAPPSET);
+		/* other regs */
+		writel_relaxed(config->ctigate, drvdata->base + CTIGATE_EXTENDED);
+		writel_relaxed(config->asicctl, drvdata->base + ASICCTL_EXTENDED);
+		writel_relaxed(config->ctiappset, drvdata->base + CTIAPPSET_EXTENDED);
+	} else {
+		for (i = 0; i < config->nr_trig_max; i++) {
+			writel_relaxed(config->ctiinen[i], drvdata->base + CTIINEN(i));
+			writel_relaxed(config->ctiouten[i],
+					      drvdata->base + CTIOUTEN(i));
+		}
+
+		/* other regs */
+		writel_relaxed(config->ctigate, drvdata->base + CTIGATE);
+		writel_relaxed(config->asicctl, drvdata->base + ASICCTL);
+		writel_relaxed(config->ctiappset, drvdata->base + CTIAPPSET);
+	}
 
 	/* re-enable CTI */
 	writel_relaxed(1, drvdata->base + CTICONTROL);
@@ -90,8 +105,15 @@ void cti_write_all_hw_regs(struct cti_drvdata *drvdata)
 static int cti_enable_hw(struct cti_drvdata *drvdata)
 {
 	struct cti_config *config = &drvdata->config;
+	struct device *dev = &drvdata->csdev->dev;
 	unsigned long flags;
 	int rc = 0;
+
+	rc = pm_runtime_get_sync(dev->parent);
+	if (rc < 0) {
+		pm_runtime_put_noidle(dev->parent);
+		return rc;
+	}
 
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 
@@ -99,10 +121,12 @@ static int cti_enable_hw(struct cti_drvdata *drvdata)
 	if (config->hw_enabled || !config->hw_powered)
 		goto cti_state_unchanged;
 
-	/* claim the device */
-	rc = coresight_claim_device(drvdata->base);
-	if (rc)
-		goto cti_err_not_enabled;
+	if (!drvdata->extended_cti) {
+		/* claim the device */
+		rc = coresight_claim_device(drvdata->csdev);
+		if (rc)
+			goto cti_err_not_enabled;
+	}
 
 	cti_write_all_hw_regs(drvdata);
 
@@ -117,6 +141,7 @@ cti_state_unchanged:
 	/* cannot enable due to error */
 cti_err_not_enabled:
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
+	pm_runtime_put(dev->parent);
 	return rc;
 }
 
@@ -133,7 +158,7 @@ static void cti_cpuhp_enable_hw(struct cti_drvdata *drvdata)
 		goto cti_hp_not_enabled;
 
 	/* try to claim the device */
-	if (coresight_claim_device(drvdata->base))
+	if (coresight_claim_device(drvdata->csdev))
 		goto cti_hp_not_enabled;
 
 	cti_write_all_hw_regs(drvdata);
@@ -150,6 +175,8 @@ cti_hp_not_enabled:
 static int cti_disable_hw(struct cti_drvdata *drvdata)
 {
 	struct cti_config *config = &drvdata->config;
+	struct device *dev = &drvdata->csdev->dev;
+	struct coresight_device *csdev = drvdata->csdev;
 
 	spin_lock(&drvdata->spinlock);
 
@@ -167,9 +194,11 @@ static int cti_disable_hw(struct cti_drvdata *drvdata)
 	writel_relaxed(0, drvdata->base + CTICONTROL);
 	config->hw_enabled = false;
 
-	coresight_disclaim_device_unlocked(drvdata->base);
+	if (!drvdata->extended_cti)
+		coresight_disclaim_device_unlocked(csdev);
 	CS_LOCK(drvdata->base);
 	spin_unlock(&drvdata->spinlock);
+	pm_runtime_put(dev->parent);
 	return 0;
 
 	/* not disabled this call */
@@ -262,8 +291,10 @@ int cti_add_connection_entry(struct device *dev, struct cti_drvdata *drvdata,
 	cti_dev->nr_trig_con++;
 
 	/* add connection usage bit info to overall info */
-	drvdata->config.trig_in_use |= tc->con_in->used_mask;
-	drvdata->config.trig_out_use |= tc->con_out->used_mask;
+	bitmap_or(drvdata->config.trig_in_use, drvdata->config.trig_in_use,
+			tc->con_in->used_mask, drvdata->config.nr_trig_max);
+	bitmap_or(drvdata->config.trig_out_use, drvdata->config.trig_out_use,
+			tc->con_out->used_mask, drvdata->config.nr_trig_max);
 
 	return 0;
 }
@@ -306,7 +337,6 @@ int cti_add_default_connection(struct device *dev, struct cti_drvdata *drvdata)
 {
 	int ret = 0;
 	int n_trigs = drvdata->config.nr_trig_max;
-	u32 n_trig_mask = GENMASK(n_trigs - 1, 0);
 	struct cti_trig_con *tc = NULL;
 
 	/*
@@ -317,10 +347,102 @@ int cti_add_default_connection(struct device *dev, struct cti_drvdata *drvdata)
 	if (!tc)
 		return -ENOMEM;
 
-	tc->con_in->used_mask = n_trig_mask;
-	tc->con_out->used_mask = n_trig_mask;
+	bitmap_fill(tc->con_in->used_mask, n_trigs);
+	bitmap_fill(tc->con_out->used_mask, n_trigs);
 	ret = cti_add_connection_entry(dev, drvdata, tc, NULL, "default");
 	return ret;
+}
+
+static int cti_trigin_gpio_enable(struct cti_drvdata *drvdata)
+{
+	int ret;
+	struct pinctrl *pctrl;
+	struct pinctrl_state *pctrl_state;
+
+	if (drvdata->gpio_trigin->pctrl)
+		return 0;
+
+	pctrl = devm_pinctrl_get(drvdata->csdev->dev.parent);
+	if (IS_ERR(pctrl)) {
+		dev_err(&drvdata->csdev->dev, "pinctrl get failed\n");
+		return PTR_ERR(pctrl);
+	}
+
+	pctrl_state = pinctrl_lookup_state(pctrl, "cti-trigin-pctrl");
+	if (IS_ERR(pctrl_state)) {
+		dev_err(&drvdata->csdev->dev,
+			"pinctrl get state failed\n");
+		ret = PTR_ERR(pctrl_state);
+		goto err;
+	}
+
+	ret = pinctrl_select_state(pctrl, pctrl_state);
+	if (ret) {
+		dev_err(&drvdata->csdev->dev,
+			"pinctrl enable state failed\n");
+		goto err;
+	}
+
+	drvdata->gpio_trigin->pctrl = pctrl;
+	return 0;
+err:
+	devm_pinctrl_put(pctrl);
+	return ret;
+}
+
+static int cti_trigout_gpio_enable(struct cti_drvdata *drvdata)
+{
+	int ret;
+	struct pinctrl *pctrl;
+	struct pinctrl_state *pctrl_state;
+
+	if (drvdata->gpio_trigout->pctrl)
+		return 0;
+
+	pctrl = devm_pinctrl_get(drvdata->csdev->dev.parent);
+	if (IS_ERR(pctrl)) {
+		dev_err(&drvdata->csdev->dev, "pinctrl get failed\n");
+		return PTR_ERR(pctrl);
+	}
+
+	pctrl_state = pinctrl_lookup_state(pctrl, "cti-trigout-pctrl");
+	if (IS_ERR(pctrl_state)) {
+		dev_err(&drvdata->csdev->dev,
+			"pinctrl get state failed\n");
+		ret = PTR_ERR(pctrl_state);
+		goto err;
+	}
+
+	ret = pinctrl_select_state(pctrl, pctrl_state);
+	if (ret) {
+		dev_err(&drvdata->csdev->dev,
+			"pinctrl enable state failed\n");
+		goto err;
+	}
+
+	drvdata->gpio_trigout->pctrl = pctrl;
+	return 0;
+err:
+	devm_pinctrl_put(pctrl);
+	return ret;
+}
+
+void cti_trigin_gpio_disable(struct cti_drvdata *drvdata)
+{
+	if (!drvdata->gpio_trigin->pctrl)
+		return;
+
+	devm_pinctrl_put(drvdata->gpio_trigin->pctrl);
+	drvdata->gpio_trigin->pctrl = NULL;
+}
+
+void cti_trigout_gpio_disable(struct cti_drvdata *drvdata)
+{
+	if (!drvdata->gpio_trigout->pctrl)
+		return;
+
+	devm_pinctrl_put(drvdata->gpio_trigout->pctrl);
+	drvdata->gpio_trigout->pctrl = NULL;
 }
 
 /** cti channel api **/
@@ -331,7 +453,6 @@ int cti_channel_trig_op(struct device *dev, enum cti_chan_op op,
 {
 	struct cti_drvdata *drvdata = dev_get_drvdata(dev->parent);
 	struct cti_config *config = &drvdata->config;
-	u32 trig_bitmask;
 	u32 chan_bitmask;
 	u32 reg_value;
 	int reg_offset;
@@ -341,25 +462,27 @@ int cti_channel_trig_op(struct device *dev, enum cti_chan_op op,
 	   (trigger_idx >= config->nr_trig_max))
 		return -EINVAL;
 
-	trig_bitmask = BIT(trigger_idx);
-
 	/* ensure registered triggers and not out filtered */
 	if (direction == CTI_TRIG_IN)	{
-		if (!(trig_bitmask & config->trig_in_use))
+		if (!(test_bit(trigger_idx, config->trig_in_use)))
 			return -EINVAL;
 	} else {
-		if (!(trig_bitmask & config->trig_out_use))
+		if (!(test_bit(trigger_idx, config->trig_out_use)))
 			return -EINVAL;
 
 		if ((config->trig_filter_enable) &&
-		    (config->trig_out_filter & trig_bitmask))
+		    test_bit(trigger_idx, config->trig_out_filter))
 			return -EINVAL;
 	}
 
 	/* update the local register values */
 	chan_bitmask = BIT(channel_idx);
-	reg_offset = (direction == CTI_TRIG_IN ? CTIINEN(trigger_idx) :
-		      CTIOUTEN(trigger_idx));
+	if (drvdata->extended_cti)
+		reg_offset = (direction == CTI_TRIG_IN ? CTIINEN_EXTENDED(trigger_idx) :
+			      CTIOUTEN_EXTENDED(trigger_idx));
+	else
+		reg_offset = (direction == CTI_TRIG_IN ? CTIINEN(trigger_idx) :
+			      CTIOUTEN(trigger_idx));
 
 	spin_lock(&drvdata->spinlock);
 
@@ -376,6 +499,22 @@ int cti_channel_trig_op(struct device *dev, enum cti_chan_op op,
 		config->ctiinen[trigger_idx] = reg_value;
 	else
 		config->ctiouten[trigger_idx] = reg_value;
+
+	if (op == CTI_CHAN_ATTACH) {
+		if (direction == CTI_TRIG_IN &&
+			drvdata->gpio_trigin->trig == trigger_idx)
+			cti_trigin_gpio_enable(drvdata);
+		else if (direction == CTI_TRIG_OUT &&
+			drvdata->gpio_trigout->trig == trigger_idx)
+			cti_trigout_gpio_enable(drvdata);
+	} else {
+		if (direction == CTI_TRIG_IN &&
+			drvdata->gpio_trigin->trig == trigger_idx)
+			cti_trigin_gpio_disable(drvdata);
+		else if (direction == CTI_TRIG_OUT &&
+			drvdata->gpio_trigout->trig == trigger_idx)
+			cti_trigout_gpio_disable(drvdata);
+	}
 
 	/* write through if enabled */
 	if (cti_active(config))
@@ -415,8 +554,12 @@ int cti_channel_gate_op(struct device *dev, enum cti_chan_gate_op op,
 	}
 	if (err == 0) {
 		config->ctigate = reg_value;
-		if (cti_active(config))
-			cti_write_single_reg(drvdata, CTIGATE, reg_value);
+		if (cti_active(config)) {
+			if (drvdata->extended_cti)
+				cti_write_single_reg(drvdata, CTIGATE_EXTENDED, reg_value);
+			else
+				cti_write_single_reg(drvdata, CTIGATE, reg_value);
+		}
 	}
 	spin_unlock(&drvdata->spinlock);
 	return err;
@@ -443,19 +586,28 @@ int cti_channel_setop(struct device *dev, enum cti_chan_set_op op,
 	case CTI_CHAN_SET:
 		config->ctiappset |= chan_bitmask;
 		reg_value  = config->ctiappset;
-		reg_offset = CTIAPPSET;
+		if (drvdata->extended_cti)
+			reg_offset = CTIAPPSET_EXTENDED;
+		else
+			reg_offset = CTIAPPSET;
 		break;
 
 	case CTI_CHAN_CLR:
 		config->ctiappset &= ~chan_bitmask;
 		reg_value = chan_bitmask;
-		reg_offset = CTIAPPCLEAR;
+		if (drvdata->extended_cti)
+			reg_offset = CTIAPPCLEAR_EXTENDED;
+		else
+			reg_offset = CTIAPPCLEAR;
 		break;
 
 	case CTI_CHAN_PULSE:
 		config->ctiappset &= ~chan_bitmask;
 		reg_value = chan_bitmask;
-		reg_offset = CTIAPPPULSE;
+		if (drvdata->extended_cti)
+			reg_offset = CTIAPPPULSE_EXTENDED;
+		else
+			reg_offset = CTIAPPPULSE;
 		break;
 
 	default:
@@ -650,6 +802,7 @@ static int cti_cpu_pm_notify(struct notifier_block *nb, unsigned long cmd,
 			     void *v)
 {
 	struct cti_drvdata *drvdata;
+	struct coresight_device *csdev;
 	unsigned int cpu = smp_processor_id();
 	int notify_res = NOTIFY_OK;
 
@@ -657,6 +810,7 @@ static int cti_cpu_pm_notify(struct notifier_block *nb, unsigned long cmd,
 		return NOTIFY_OK;
 
 	drvdata = cti_cpu_drvdata[cpu];
+	csdev = drvdata->csdev;
 
 	if (WARN_ON_ONCE(drvdata->ctidev.cpu != cpu))
 		return NOTIFY_BAD;
@@ -668,13 +822,13 @@ static int cti_cpu_pm_notify(struct notifier_block *nb, unsigned long cmd,
 		/* CTI regs all static - we have a copy & nothing to save */
 		drvdata->config.hw_powered = false;
 		if (drvdata->config.hw_enabled)
-			coresight_disclaim_device(drvdata->base);
+			coresight_disclaim_device(csdev);
 		break;
 
 	case CPU_PM_ENTER_FAILED:
 		drvdata->config.hw_powered = true;
 		if (drvdata->config.hw_enabled) {
-			if (coresight_claim_device(drvdata->base))
+			if (coresight_claim_device(csdev))
 				drvdata->config.hw_enabled = false;
 		}
 		break;
@@ -687,7 +841,7 @@ static int cti_cpu_pm_notify(struct notifier_block *nb, unsigned long cmd,
 		/* check enable reference count to enable HW */
 		if (atomic_read(&drvdata->config.enable_req_count)) {
 			/* check we can claim the device as we re-power */
-			if (coresight_claim_device(drvdata->base))
+			if (coresight_claim_device(csdev))
 				goto cti_notify_exit;
 
 			drvdata->config.hw_enabled = true;
@@ -731,7 +885,7 @@ static int cti_dying_cpu(unsigned int cpu)
 	spin_lock(&drvdata->spinlock);
 	drvdata->config.hw_powered = false;
 	if (drvdata->config.hw_enabled)
-		coresight_disclaim_device(drvdata->base);
+		coresight_disclaim_device(drvdata->csdev);
 	spin_unlock(&drvdata->spinlock);
 	return 0;
 }
@@ -842,6 +996,46 @@ static void cti_remove(struct amba_device *adev)
 	coresight_unregister(drvdata->csdev);
 }
 
+static bool is_extended_cti(struct device *dev)
+{
+	return fwnode_property_present(dev->fwnode, "qcom,extended_cti");
+}
+
+static int cti_parse_gpio(struct cti_drvdata *drvdata, struct amba_device *adev)
+{
+	int ret;
+	int trig;
+
+	drvdata->gpio_trigin = devm_kzalloc(&adev->dev,
+			sizeof(struct cti_pctrl), GFP_KERNEL);
+	if (!drvdata->gpio_trigin)
+		return -ENOMEM;
+
+	drvdata->gpio_trigin->trig = -1;
+	ret = of_property_read_u32(adev->dev.of_node,
+			"qcom,cti-gpio-trigin", &trig);
+	if (!ret)
+		drvdata->gpio_trigin->trig = trig;
+	else if (ret != -EINVAL)
+		return ret;
+
+	drvdata->gpio_trigout = devm_kzalloc(&adev->dev,
+			sizeof(struct cti_pctrl), GFP_KERNEL);
+	if (!drvdata->gpio_trigout)
+		return -ENOMEM;
+
+	drvdata->gpio_trigout->trig = -1;
+	ret = of_property_read_u32(adev->dev.of_node,
+			"qcom,cti-gpio-trigout", &trig);
+
+	if (!ret)
+		drvdata->gpio_trigout->trig = trig;
+	else if (ret != -EINVAL)
+		return ret;
+
+	return 0;
+}
+
 static int cti_probe(struct amba_device *adev, const struct amba_id *id)
 {
 	int ret = 0;
@@ -863,6 +1057,7 @@ static int cti_probe(struct amba_device *adev, const struct amba_id *id)
 		return PTR_ERR(base);
 
 	drvdata->base = base;
+	cti_desc.access = CSDEV_ACCESS_IOMEM(base);
 
 	dev_set_drvdata(dev, drvdata);
 
@@ -894,6 +1089,10 @@ static int cti_probe(struct amba_device *adev, const struct amba_id *id)
 		cti_desc.name = coresight_alloc_device_name(&cti_sys_devs, dev);
 	if (!cti_desc.name)
 		return -ENOMEM;
+
+	ret = cti_parse_gpio(drvdata, adev);
+	if (ret)
+		return ret;
 
 	/* setup CPU power management handling for CPU bound CTI devices. */
 	ret = cti_pm_setup(drvdata);
@@ -932,6 +1131,7 @@ static int cti_probe(struct amba_device *adev, const struct amba_id *id)
 	drvdata->csdev_release = drvdata->csdev->dev.release;
 	drvdata->csdev->dev.release = cti_device_release;
 
+	drvdata->extended_cti = is_extended_cti(dev);
 	/* all done - dec pm refcount */
 	pm_runtime_put(&adev->dev);
 	dev_info(&drvdata->csdev->dev, "CTI initialized\n");

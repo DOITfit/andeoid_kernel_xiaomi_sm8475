@@ -720,6 +720,9 @@ static const struct nla_policy nl80211_policy[NUM_NL80211_ATTR] = {
 		NLA_POLICY_EXACT_LEN(IEEE80211_S1G_CAPABILITY_LEN),
 	[NL80211_ATTR_S1G_CAPABILITY_MASK] =
 		NLA_POLICY_EXACT_LEN(IEEE80211_S1G_CAPABILITY_LEN),
+	[NL80211_ATTR_SAE_PWE] =
+		NLA_POLICY_RANGE(NLA_U8, NL80211_SAE_PWE_HUNT_AND_PECK,
+				 NL80211_SAE_PWE_BOTH),
 };
 
 /* policy for the key attributes */
@@ -9747,6 +9750,12 @@ static int nl80211_crypto_settings(struct cfg80211_registered_device *rdev,
 			nla_len(info->attrs[NL80211_ATTR_SAE_PASSWORD]);
 	}
 
+	if (info->attrs[NL80211_ATTR_SAE_PWE])
+		settings->sae_pwe =
+			nla_get_u8(info->attrs[NL80211_ATTR_SAE_PWE]);
+	else
+		settings->sae_pwe = NL80211_SAE_PWE_UNSPECIFIED;
+
 	return 0;
 }
 
@@ -12675,7 +12684,7 @@ static int nl80211_set_rekey_data(struct sk_buff *skb, struct genl_info *info)
 		return -ERANGE;
 	if (nla_len(tb[NL80211_REKEY_DATA_KCK]) != NL80211_KCK_LEN &&
 	    !(rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_EXT_KEK_KCK &&
-	      nla_len(tb[NL80211_REKEY_DATA_KEK]) == NL80211_KCK_EXT_LEN))
+	      nla_len(tb[NL80211_REKEY_DATA_KCK]) == NL80211_KCK_EXT_LEN))
 		return -ERANGE;
 
 	rekey_data.kek = nla_data(tb[NL80211_REKEY_DATA_KEK]);

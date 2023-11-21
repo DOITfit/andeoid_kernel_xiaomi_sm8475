@@ -46,8 +46,8 @@ unsigned long __recover_optprobed_insn(kprobe_opcode_t *buf, unsigned long addr)
 		/* This function only handles jump-optimized kprobe */
 		if (kp && kprobe_optimized(kp)) {
 			op = container_of(kp, struct optimized_kprobe, kp);
-			/* If op->list is not empty, op is under optimizing */
-			if (list_empty(&op->list))
+			/* If op is optimized or under unoptimizing */
+			if (list_empty(&op->list) || optprobe_queued_unopt(op))
 				goto found;
 		}
 	}
@@ -104,6 +104,14 @@ static void synthesize_set_arg1(kprobe_opcode_t *addr, unsigned long val)
 asm (
 			".pushsection .rodata\n"
 			"optprobe_template_func:\n"
+			".pushsection .discard.func_stack_frame_non_standard\n"
+			"__func_stack_frame_non_standard_optprobe_template_func:\n"
+#ifdef CONFIG_64BIT
+		        ".quad optprobe_template_func\n"
+#else
+			".long optprobe_template_func\n"
+#endif
+			".popsection\n"
 			".global optprobe_template_entry\n"
 			"optprobe_template_entry:\n"
 #ifdef CONFIG_X86_64
@@ -154,9 +162,6 @@ asm (
 			".global optprobe_template_end\n"
 			"optprobe_template_end:\n"
 			".popsection\n");
-
-void optprobe_template_func(void);
-STACK_FRAME_NON_STANDARD(optprobe_template_func);
 
 #define TMPL_CLAC_IDX \
 	((long)optprobe_template_clac - (long)optprobe_template_entry)
@@ -346,7 +351,7 @@ int arch_check_optimized_kprobe(struct optimized_kprobe *op)
 
 	for (i = 1; i < op->optinsn.size; i++) {
 		p = get_kprobe(op->kp.addr + i);
-		if (p && !kprobe_disabled(p))
+		if (p && !kprobe_disarmed(p))
 			return -EEXIST;
 	}
 

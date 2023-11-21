@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2012, 2021, The Linux Foundation. All rights reserved.
  *
  * Description: CoreSight Program Flow Trace driver
  */
@@ -358,10 +358,11 @@ static int etm_enable_hw(struct etm_drvdata *drvdata)
 	int i, rc;
 	u32 etmcr;
 	struct etm_config *config = &drvdata->config;
+	struct coresight_device *csdev = drvdata->csdev;
 
 	CS_UNLOCK(drvdata->base);
 
-	rc = coresight_claim_device_unlocked(drvdata->base);
+	rc = coresight_claim_device_unlocked(csdev);
 	if (rc)
 		goto done;
 
@@ -454,6 +455,7 @@ int etm_get_trace_id(struct etm_drvdata *drvdata)
 	unsigned long flags;
 	int trace_id = -1;
 	struct device *etm_dev;
+	int ret;
 
 	if (!drvdata)
 		goto out;
@@ -462,7 +464,11 @@ int etm_get_trace_id(struct etm_drvdata *drvdata)
 	if (!local_read(&drvdata->mode))
 		return drvdata->traceid;
 
-	pm_runtime_get_sync(etm_dev);
+	ret = pm_runtime_get_sync(etm_dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(etm_dev);
+		return ret;
+	}
 
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 
@@ -566,6 +572,7 @@ static void etm_disable_hw(void *info)
 	int i;
 	struct etm_drvdata *drvdata = info;
 	struct etm_config *config = &drvdata->config;
+	struct coresight_device *csdev = drvdata->csdev;
 
 	CS_UNLOCK(drvdata->base);
 	etm_set_prog(drvdata);
@@ -577,7 +584,7 @@ static void etm_disable_hw(void *info)
 		config->cntr_val[i] = etm_readl(drvdata, ETMCNTVRn(i));
 
 	etm_set_pwrdwn(drvdata);
-	coresight_disclaim_device_unlocked(drvdata->base);
+	coresight_disclaim_device_unlocked(csdev);
 
 	CS_LOCK(drvdata->base);
 
@@ -602,7 +609,7 @@ static void etm_disable_perf(struct coresight_device *csdev)
 	 * power down the tracer.
 	 */
 	etm_set_pwrdwn(drvdata);
-	coresight_disclaim_device_unlocked(drvdata->base);
+	coresight_disclaim_device_unlocked(csdev);
 
 	CS_LOCK(drvdata->base);
 }
@@ -839,6 +846,7 @@ static int etm_probe(struct amba_device *adev, const struct amba_id *id)
 		return PTR_ERR(base);
 
 	drvdata->base = base;
+	desc.access = CSDEV_ACCESS_IOMEM(base);
 
 	spin_lock_init(&drvdata->spinlock);
 

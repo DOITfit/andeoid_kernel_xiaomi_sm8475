@@ -256,7 +256,6 @@ config SPI_DW_BT1
 	tristate "Baikal-T1 SPI driver for DW SPI core"
 	depends on MIPS_BAIKAL_T1 || COMPILE_TEST
 	select MULTIPLEXER
-	select MUX_MMIO
 	help
 	  Baikal-T1 SoC is equipped with three DW APB SSI-based MMIO SPI
 	  controllers. Two of them are pretty much normal: with IRQ, DMA,
@@ -688,6 +687,18 @@ config SPI_QCOM_GENI
 
 	  This driver can also be built as a module.  If so, the module
 	  will be called spi-geni-qcom.
+
+config SPI_MSM_GENI
+	tristate "Qualcomm Technologies Inc.'s GENI based SPI controller"
+	depends on MSM_GENI_SE
+	help
+	  This driver supports GENI serial engine based SPI controller in
+	  master mode on the Qualcomm Technologies Inc.'s SoCs. If you say
+	  yes to this option, support will be included for the built-in SPI
+	  interface on the Qualcomm Technologies Inc.'s SoCs.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called spi-msm-geni.
 
 config SPI_S3C24XX
 	tristate "Samsung S3C24XX series SPI"

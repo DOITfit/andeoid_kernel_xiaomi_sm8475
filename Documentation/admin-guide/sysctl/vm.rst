@@ -38,8 +38,10 @@ Currently, these files are in /proc/sys/vm:
 - dirty_writeback_centisecs
 - drop_caches
 - extfrag_threshold
+- extra_free_kbytes
 - highmem_is_dirtyable
 - hugetlb_shm_group
+- kswapd_threads
 - laptop_mode
 - legacy_va_layout
 - lowmem_reserve_ratio
@@ -126,7 +128,8 @@ compaction_proactiveness
 
 This tunable takes a value in the range [0, 100] with a default value of
 20. This tunable determines how aggressively compaction is done in the
-background. Setting it to 0 disables proactive compaction.
+background. On write of non zero value to this tunable will immediately
+trigger the proactive compaction. Setting it to 0 disables proactive compaction.
 
 Note that compaction has a non-trivial system-wide impact as pages
 belonging to different processes are moved around, which could also lead
@@ -307,12 +310,46 @@ only use the low memory and they can fill it up with dirty data without
 any throttling.
 
 
+extra_free_kbytes
+
+This parameter tells the VM to keep extra free memory between the threshold
+where background reclaim (kswapd) kicks in, and the threshold where direct
+reclaim (by allocating processes) kicks in.
+
+This is useful for workloads that require low latency memory allocations
+and have a bounded burstiness in memory allocations, for example a
+realtime application that receives and transmits network traffic
+(causing in-kernel memory allocations) with a maximum total message burst
+size of 200MB may need 200MB of extra free memory to avoid direct reclaim
+related latencies.
+
+==============================================================
+
 hugetlb_shm_group
 =================
 
 hugetlb_shm_group contains group id that is allowed to create SysV
 shared memory segment using hugetlb page.
 
+kswapd_threads
+==============
+kswapd_threads allows you to control the number of kswapd threads per node
+running on the system. This provides the ability to devote additional CPU
+resources toward proactive page replacement with the goal of reducing
+direct reclaims. When direct reclaims are prevented, the CPU consumed
+by them is prevented as well. Depending on the workload, the result can
+cause aggregate CPU usage on the system to go up, down or stay the same.
+
+More aggressive page replacement can reduce direct reclaims which cause
+latency for tasks and decrease throughput when doing filesystem IO through
+the pagecache. Direct reclaims are recorded using the allocstall counter
+in /proc/vmstat.
+
+The default value is 1 and the range of acceptible values are 1-16.
+Always start with lower values in the 2-6 range. Higher values should
+be justified with testing. If direct reclaims occur in spite of high
+values, the cost of direct reclaims (in latency) that occur can be
+higher due to increased lock contention.
 
 laptop_mode
 ===========
@@ -873,12 +910,17 @@ file-backed pages is less than the high watermark in a zone.
 unprivileged_userfaultfd
 ========================
 
-This flag controls whether unprivileged users can use the userfaultfd
-system calls.  Set this to 1 to allow unprivileged users to use the
-userfaultfd system calls, or set this to 0 to restrict userfaultfd to only
-privileged users (with SYS_CAP_PTRACE capability).
+This flag controls the mode in which unprivileged users can use the
+userfaultfd system calls. Set this to 0 to restrict unprivileged users
+to handle page faults in user mode only. In this case, users without
+SYS_CAP_PTRACE must pass UFFD_USER_MODE_ONLY in order for userfaultfd to
+succeed. Prohibiting use of userfaultfd for handling faults from kernel
+mode may make certain vulnerabilities more difficult to exploit.
 
-The default value is 1.
+Set this to 1 to allow unprivileged users to use the userfaultfd system
+calls without any restrictions.
+
+The default value is 0.
 
 
 user_reserve_kbytes

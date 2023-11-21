@@ -236,7 +236,7 @@ static void panfrost_mmu_flush_range(struct panfrost_device *pfdev,
 	if (pm_runtime_active(pfdev->dev))
 		mmu_hw_do_operation(pfdev, mmu, iova, size, AS_COMMAND_FLUSH_PT);
 
-	pm_runtime_put_sync_autosuspend(pfdev->dev);
+	pm_runtime_put_autosuspend(pfdev->dev);
 }
 
 static int mmu_map_sg(struct panfrost_device *pfdev, struct panfrost_mmu *mmu,
@@ -341,16 +341,9 @@ static void mmu_tlb_flush_walk(unsigned long iova, size_t size, size_t granule,
 	mmu_tlb_sync_context(cookie);
 }
 
-static void mmu_tlb_flush_leaf(unsigned long iova, size_t size, size_t granule,
-			       void *cookie)
-{
-	mmu_tlb_sync_context(cookie);
-}
-
 static const struct iommu_flush_ops mmu_tlb_ops = {
 	.tlb_flush_all	= mmu_tlb_inv_context_s1,
 	.tlb_flush_walk = mmu_tlb_flush_walk,
-	.tlb_flush_leaf = mmu_tlb_flush_leaf,
 };
 
 static struct panfrost_gem_mapping *
@@ -458,6 +451,7 @@ static int panfrost_mmu_map_fault_addr(struct panfrost_device *pfdev, int as,
 		if (IS_ERR(pages[i])) {
 			mutex_unlock(&bo->base.pages_lock);
 			ret = PTR_ERR(pages[i]);
+			pages[i] = NULL;
 			goto err_pages;
 		}
 	}

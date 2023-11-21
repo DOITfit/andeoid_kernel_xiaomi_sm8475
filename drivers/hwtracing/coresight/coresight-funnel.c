@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2012, 2020-2021, The Linux Foundation. All rights reserved.
  *
  * Description: CoreSight Funnel driver
  */
@@ -19,6 +19,7 @@
 #include <linux/coresight.h>
 #include <linux/amba/bus.h>
 #include <linux/clk.h>
+#include <linux/of_address.h>
 
 #include "coresight-priv.h"
 
@@ -52,13 +53,14 @@ static int dynamic_funnel_enable_hw(struct funnel_drvdata *drvdata, int port)
 {
 	u32 functl;
 	int rc = 0;
+	struct coresight_device *csdev = drvdata->csdev;
 
 	CS_UNLOCK(drvdata->base);
 
 	functl = readl_relaxed(drvdata->base + FUNNEL_FUNCTL);
 	/* Claim the device only when we enable the first slave */
 	if (!(functl & FUNNEL_ENSx_MASK)) {
-		rc = coresight_claim_device_unlocked(drvdata->base);
+		rc = coresight_claim_device_unlocked(csdev);
 		if (rc)
 			goto done;
 	}
@@ -101,6 +103,7 @@ static void dynamic_funnel_disable_hw(struct funnel_drvdata *drvdata,
 				      int inport)
 {
 	u32 functl;
+	struct coresight_device *csdev = drvdata->csdev;
 
 	CS_UNLOCK(drvdata->base);
 
@@ -110,7 +113,7 @@ static void dynamic_funnel_disable_hw(struct funnel_drvdata *drvdata,
 
 	/* Disclaim the device if none of the slaves are now active */
 	if (!(functl & FUNNEL_ENSx_MASK))
-		coresight_disclaim_device_unlocked(drvdata->base);
+		coresight_disclaim_device_unlocked(csdev);
 
 	CS_LOCK(drvdata->base);
 }
@@ -185,8 +188,13 @@ static ssize_t funnel_ctrl_show(struct device *dev,
 {
 	u32 val;
 	struct funnel_drvdata *drvdata = dev_get_drvdata(dev->parent);
+	int ret;
 
-	pm_runtime_get_sync(dev->parent);
+	ret = pm_runtime_get_sync(dev->parent);
+	if (ret < 0) {
+		pm_runtime_put_noidle(dev->parent);
+		return ret;
+	}
 
 	val = get_funnel_ctrl_hw(drvdata);
 
@@ -203,13 +211,38 @@ static struct attribute *coresight_funnel_attrs[] = {
 };
 ATTRIBUTE_GROUPS(coresight_funnel);
 
+static int funnel_get_resource_byname(struct device_node *np,
+				   char *ch_base, struct resource *res)
+{
+	const char *name = NULL;
+	int index = 0, found = 0;
+
+	while (!of_property_read_string_index(np, "reg-names", index, &name)) {
+		if (strcmp(ch_base, name)) {
+			index++;
+			continue;
+		}
+
+		/* We have a match and @index is where it's at */
+		found = 1;
+		break;
+	}
+
+	if (!found)
+		return -EINVAL;
+
+	return of_address_to_resource(np, index, res);
+}
+
 static int funnel_probe(struct device *dev, struct resource *res)
 {
 	int ret;
 	void __iomem *base;
 	struct coresight_platform_data *pdata = NULL;
 	struct funnel_drvdata *drvdata;
+	struct resource res_real;
 	struct coresight_desc desc = { 0 };
+	struct device_node *np = dev->of_node;
 
 	if (is_of_node(dev_fwnode(dev)) &&
 	    of_device_is_compatible(dev->of_node, "arm,coresight-funnel"))
@@ -230,11 +263,26 @@ static int funnel_probe(struct device *dev, struct resource *res)
 			return ret;
 	}
 
-	/*
-	 * Map the device base for dynamic-funnel, which has been
-	 * validated by AMBA core.
-	 */
-	if (res) {
+	if (of_property_read_bool(np, "qcom,duplicate-funnel")) {
+		ret = funnel_get_resource_byname(np, "funnel-base-real",
+						 &res_real);
+		if (ret)
+			return ret;
+
+		res = &res_real;
+		base = devm_ioremap(dev, res->start, resource_size(res));
+		if (IS_ERR(base)) {
+			ret = PTR_ERR(base);
+			goto out_disable_clk;
+		}
+		drvdata->base = base;
+		desc.groups = coresight_funnel_groups;
+		desc.access = CSDEV_ACCESS_IOMEM(base);
+	} else if (res) {
+		/*
+		 * Map the device base for dynamic-funnel, which has been
+		 * validated by AMBA core.
+		 */
 		base = devm_ioremap_resource(dev, res);
 		if (IS_ERR(base)) {
 			ret = PTR_ERR(base);
@@ -242,6 +290,7 @@ static int funnel_probe(struct device *dev, struct resource *res)
 		}
 		drvdata->base = base;
 		desc.groups = coresight_funnel_groups;
+		desc.access = CSDEV_ACCESS_IOMEM(base);
 	}
 
 	dev_set_drvdata(dev, drvdata);

@@ -26,6 +26,8 @@
 #include <linux/types.h>
 #include <linux/workqueue.h>
 #include <linux/usb/ch9.h>
+#include <linux/pm_runtime.h>
+#include <linux/android_kabi.h>
 
 #define UDC_TRACE_STR_MAX	512
 
@@ -122,6 +124,8 @@ struct usb_request {
 
 	int			status;
 	unsigned		actual;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*-------------------------------------------------------------------------*/
@@ -152,6 +156,8 @@ struct usb_ep_ops {
 
 	int (*fifo_status) (struct usb_ep *ep);
 	void (*fifo_flush) (struct usb_ep *ep);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -240,6 +246,8 @@ struct usb_ep {
 	u8			address;
 	const struct usb_endpoint_descriptor	*desc;
 	const struct usb_ss_ep_comp_descriptor	*comp_desc;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*-------------------------------------------------------------------------*/
@@ -323,9 +331,21 @@ struct usb_gadget_ops {
 			struct usb_gadget_driver *);
 	int	(*udc_stop)(struct usb_gadget *);
 	void	(*udc_set_speed)(struct usb_gadget *, enum usb_device_speed);
+	void	(*udc_set_ssp_rate)(struct usb_gadget *gadget,
+			enum usb_ssp_rate rate);
+	void	(*udc_async_callbacks)(struct usb_gadget *gadget, bool enable);
 	struct usb_ep *(*match_ep)(struct usb_gadget *,
 			struct usb_endpoint_descriptor *,
 			struct usb_ss_ep_comp_descriptor *);
+	int	(*check_config)(struct usb_gadget *gadget);
+#ifdef CONFIG_USB_FUNC_WAKEUP_SUPPORTED
+	int     (*func_wakeup)(struct usb_gadget *, int interface_id);
+#endif
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /**
@@ -339,6 +359,10 @@ struct usb_gadget_ops {
  * @speed: Speed of current connection to USB host.
  * @max_speed: Maximal speed the UDC can handle.  UDC must support this
  *      and all slower speeds.
+ * @ssp_rate: Current connected SuperSpeed Plus signaling rate and lane count.
+ * @max_ssp_rate: Maximum SuperSpeed Plus signaling rate and lane count the UDC
+ *	can handle. The UDC must support this and all slower speeds and lower
+ *	number of lanes.
  * @state: the state we are now (attached, suspended, configured, etc)
  * @name: Identifies the controller hardware type.  Used in diagnostics
  *	and sometimes configuration.
@@ -406,6 +430,11 @@ struct usb_gadget {
 	struct list_head		ep_list;	/* of usb_ep */
 	enum usb_device_speed		speed;
 	enum usb_device_speed		max_speed;
+
+	/* USB SuperSpeed Plus only */
+	enum usb_ssp_rate		ssp_rate;
+	enum usb_ssp_rate		max_ssp_rate;
+
 	enum usb_device_state		state;
 	const char			*name;
 	struct device			dev;
@@ -433,6 +462,11 @@ struct usb_gadget {
 	unsigned			connected:1;
 	unsigned			lpm_capable:1;
 	int				irq;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 #define work_to_gadget(w)	(container_of((w), struct usb_gadget, work))
 
@@ -596,6 +630,7 @@ int usb_gadget_connect(struct usb_gadget *gadget);
 int usb_gadget_disconnect(struct usb_gadget *gadget);
 int usb_gadget_deactivate(struct usb_gadget *gadget);
 int usb_gadget_activate(struct usb_gadget *gadget);
+int usb_gadget_check_config(struct usb_gadget *gadget);
 #else
 static inline int usb_gadget_frame_number(struct usb_gadget *gadget)
 { return 0; }
@@ -619,7 +654,18 @@ static inline int usb_gadget_deactivate(struct usb_gadget *gadget)
 { return 0; }
 static inline int usb_gadget_activate(struct usb_gadget *gadget)
 { return 0; }
+static inline int usb_gadget_check_config(struct usb_gadget *gadget)
+{ return 0; }
 #endif /* CONFIG_USB_GADGET */
+
+#if IS_ENABLED(CONFIG_USB_GADGET) && \
+	IS_BUILTIN(CONFIG_USB_FUNC_WAKEUP_SUPPORTED)
+int usb_gadget_func_wakeup(struct usb_gadget *gadget, int interface_id);
+#else
+static inline int usb_gadget_func_wakeup(struct usb_gadget *gadget,
+		int interface_id)
+{ return 0; }
+#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -899,6 +945,129 @@ extern int usb_gadget_ep_match_desc(struct usb_gadget *gadget,
 
 /* utility to update vbus status for udc core, it may be scheduled */
 extern void usb_udc_vbus_handler(struct usb_gadget *gadget, bool status);
+
+/**
+ * usb_gadget_autopm_get - increment PM-usage counter of usb gadget's parent
+ * device.
+ * @gadget: usb gadget whose parent device counter is incremented
+ *
+ * This routine should be called by function driver when it wants to use
+ * gadget's parent device and needs to guarantee that it is not suspended. In
+ * addition, the routine prevents subsequent autosuspends of gadget's parent
+ * device. However if the autoresume fails then the counter is re-decremented.
+ *
+ * This routine can run only in process context.
+ */
+static inline int usb_gadget_autopm_get(struct usb_gadget *gadget)
+{
+	int status = -ENODEV;
+
+	if (!gadget || !gadget->dev.parent)
+		return status;
+
+	status = pm_runtime_get_sync(gadget->dev.parent);
+	if (status < 0)
+		pm_runtime_put_sync(gadget->dev.parent);
+
+	if (status > 0)
+		status = 0;
+	return status;
+}
+
+/**
+ * usb_gadget_autopm_get_async - increment PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is incremented
+ *
+ * This routine increments @gadget parent device PM usage counter and queue an
+ * autoresume request if the device is suspended. It does not autoresume device
+ * directly (it only queues a request). After a successful call, the device may
+ * not yet be resumed.
+ *
+ * This routine can run in atomic context.
+ */
+static inline int usb_gadget_autopm_get_async(struct usb_gadget *gadget)
+{
+	int status = -ENODEV;
+
+	if (!gadget || !gadget->dev.parent)
+		return status;
+
+	status = pm_runtime_get(gadget->dev.parent);
+	if (status < 0 && status != -EINPROGRESS)
+		pm_runtime_put_noidle(gadget->dev.parent);
+
+	if (status > 0 || status == -EINPROGRESS)
+		status = 0;
+	return status;
+}
+
+/**
+ * usb_gadget_autopm_get_noresume - increment PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is incremented
+ *
+ * This routine increments PM-usage count of @gadget parent device but does not
+ * carry out an autoresume.
+ *
+ * This routine can run in atomic context.
+ */
+static inline void usb_gadget_autopm_get_noresume(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_get_noresume(gadget->dev.parent);
+}
+
+/**
+ * usb_gadget_autopm_put - decrement PM-usage counter of usb gadget's parent
+ * device.
+ * @gadget: usb gadget whose parent device counter is decremented.
+ *
+ * This routine should be called by function driver when it is finished using
+ * @gadget parent device and wants to allow it to autosuspend. It decrements
+ * PM-usage counter of @gadget parent device, when the counter reaches 0, a
+ * delayed autosuspend request is attempted.
+ *
+ * This routine can run only in process context.
+ */
+static inline void usb_gadget_autopm_put(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_put_sync(gadget->dev.parent);
+}
+
+/**
+ * usb_gadget_autopm_put_async - decrement PM-usage counter of usb gadget's
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is decremented.
+ *
+ * This routine decrements PM-usage counter of @gadget parent device and
+ * schedules a delayed autosuspend request if the counter is <= 0.
+ *
+ * This routine can run in atomic context.
+ */
+static inline void usb_gadget_autopm_put_async(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_put(gadget->dev.parent);
+}
+
+/**
+ * usb_gadget_autopm_put_no_suspend - decrement PM-usage counter of usb gadget
+'s
+ * parent device.
+ * @gadget: usb gadget whose parent device counter is decremented.
+ *
+ * This routine decrements PM-usage counter of @gadget parent device but does
+ * not carry out an autosuspend.
+ *
+ * This routine can run in atomic context.
+ */
+static inline void usb_gadget_autopm_put_no_suspend(struct usb_gadget *gadget)
+{
+	if (gadget && gadget->dev.parent)
+		pm_runtime_put_noidle(gadget->dev.parent);
+}
 
 /*-------------------------------------------------------------------------*/
 

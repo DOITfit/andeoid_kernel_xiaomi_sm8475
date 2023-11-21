@@ -145,6 +145,16 @@ config DAVINCI_CP_INTC
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
 
+config QCOM_SHOW_RESUME_IRQ
+	tristate "Enable logging of interrupts that could have caused resume"
+	depends on ARM_GIC_V3 && PM
+	default n
+	help
+	  This option logs wake up interrupts that have triggered just before
+	  the resume loop unrolls. It helps to debug to know any unnecessary
+	  wake up interrupts that causes system to come out of low power modes.
+	  Say Y if you want to debug why the system resumed.
+
 config DW_APB_ICTL
 	bool
 	select GENERIC_IRQ_CHIP
@@ -417,8 +427,9 @@ config IRQ_UNIPHIER_AIDET
 	  Support for the UniPhier AIDET (ARM Interrupt Detector).
 
 config MESON_IRQ_GPIO
-       bool "Meson GPIO Interrupt Multiplexer"
-       depends on ARCH_MESON
+       tristate "Meson GPIO Interrupt Multiplexer"
+       depends on ARCH_MESON || COMPILE_TEST
+       default ARCH_MESON
        select IRQ_DOMAIN_HIERARCHY
        help
          Support Meson SoC Family GPIO Interrupt Multiplexer
@@ -433,8 +444,9 @@ config GOLDFISH_PIC
          for Goldfish based virtual platforms.
 
 config QCOM_PDC
-	bool "QCOM PDC"
+	tristate "QCOM PDC"
 	depends on ARCH_QCOM
+	depends on QCOM_SCM || !QCOM_SCM
 	select IRQ_DOMAIN_HIERARCHY
 	help
 	  Power Domain Controller driver to manage and configure wakeup
@@ -524,6 +536,17 @@ config RISCV_INTC
 	   a RISC-V system will be unable to handle any interrupts.
 
 	   If you don't know what to do here, say Y.
+
+config QCOM_MPM
+	tristate "QCOM MPM"
+	depends on ARCH_QCOM
+	select IRQ_DOMAIN
+	select IRQ_DOMAIN_HIERARCHY
+	help
+	  MSM Power Manager driver to manage and configure wakeup
+	  IRQs for Qualcomm Technologies Inc (QTI) mobile chips.
+	  Say yes here to enable the MSM Power Manager interrupt
+	  controller to use as a wakeup interrupt controller.
 
 config SIFIVE_PLIC
 	bool "SiFive Platform-Level Interrupt Controller"
